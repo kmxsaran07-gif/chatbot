@@ -1,31 +1,37 @@
-import threading
-import time
+import threading, time
 from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import BOT_TOKEN, OWNER_ID, WELCOME_MSG
 
-# ---------- INIT ----------
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-# ---------- MEMORY DATA ----------
-users = {}          # user_id : info
+# ---------------- DATA ----------------
+users = {}
 banned_users = set()
 silent_users = set()
-reply_map = {}      # forwarded_msg_id : user_id
+reply_map = {}        # admin_forwarded_msg_id : user_id
 last_msg_time = {}
 admin_online = True
 
-# ---------- FLASK ----------
+# ---------------- FLASK ----------------
 @app.route("/")
 def home():
-    return "Bot is running successfully!", 200
+    return "Bot running", 200
 
 def run_bot():
     bot.infinity_polling(skip_pending=True)
 
-# ---------- HELPERS ----------
+# ---------------- HELPERS ----------------
+def save_user(user):
+    if user.id not in users:
+        users[user.id] = {
+            "name": user.first_name,
+            "username": user.username,
+            "joined": time.strftime("%d-%m-%Y %H:%M")
+        }
+
 def is_spam(uid):
     now = time.time()
     if uid in last_msg_time and now - last_msg_time[uid] < 2:
@@ -33,35 +39,23 @@ def is_spam(uid):
     last_msg_time[uid] = now
     return False
 
-def save_user(user):
-    uid = user.id
-    if uid not in users:
-        users[uid] = {
-            "name": user.first_name,
-            "username": user.username,
-            "joined": time.strftime("%d-%m-%Y %H:%M")
-        }
-
-# ---------- START ----------
+# ---------------- START ----------------
 @bot.message_handler(commands=['start'])
 def start(message):
-    uid = message.from_user.id
-    if uid in banned_users:
+    if message.from_user.id in banned_users:
         return
-
     save_user(message.from_user)
-
     bot.send_message(
         message.chat.id,
         WELCOME_MSG.format(name=message.from_user.first_name)
     )
 
-# ---------- USER MESSAGE ----------
+# ---------------- USER -> ADMIN ----------------
 @bot.message_handler(
     func=lambda m: m.chat.type == "private" and m.from_user.id != OWNER_ID,
     content_types=['text','photo','video','document','audio','voice','sticker']
 )
-def user_message(message):
+def user_msg(message):
     uid = message.from_user.id
 
     if uid in banned_users or is_spam(uid):
@@ -72,49 +66,37 @@ def user_message(message):
     if uid in silent_users:
         return
 
-    if not admin_online:
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Admin offline hai, reply thoda late ho sakta hai"
-        )
-
     fwd = bot.forward_message(
         OWNER_ID,
         message.chat.id,
         message.message_id
     )
 
+    # 🔑 REAL KEY FIX
     reply_map[fwd.message_id] = uid
 
-    bot.send_message(
-        message.chat.id,
-        "✅ Message admin ko bhej diya gaya hai.\n⏳ Please wait."
-    )
+    bot.send_message(message.chat.id, "✅ Message sent to admin")
 
-# ---------- ADMIN REPLY ----------
+# ---------------- ADMIN REPLY ----------------
 @bot.message_handler(func=lambda m: m.from_user.id == OWNER_ID and m.reply_to_message)
 def admin_reply(message):
     mid = message.reply_to_message.message_id
     if mid not in reply_map:
         return
-
     uid = reply_map[mid]
     bot.copy_message(uid, message.chat.id, message.message_id)
 
-# ---------- ADMIN PANEL ----------
+# ---------------- ADMIN PANEL ----------------
 def admin_panel():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("🚫 Ban", callback_data="ban"),
         InlineKeyboardButton("✅ Unban", callback_data="unban"),
         InlineKeyboardButton("🤫 Silent", callback_data="silent"),
-        InlineKeyboardButton("👤 User Info", callback_data="info"),
-        InlineKeyboardButton("🖼 User DP", callback_data="dp"),
-        InlineKeyboardButton("👥 Total Users", callback_data="total"),
-        InlineKeyboardButton("📊 Stats", callback_data="stats"),
-        InlineKeyboardButton("📢 Broadcast", callback_data="broadcast"),
-        InlineKeyboardButton("🟢 Admin ON", callback_data="admin_on"),
-        InlineKeyboardButton("🔴 Admin OFF", callback_data="admin_off")
+        InlineKeyboardButton("👤 Info", callback_data="info"),
+        InlineKeyboardButton("🖼 DP", callback_data="dp"),
+        InlineKeyboardButton("👥 Users", callback_data="total"),
+        InlineKeyboardButton("📢 Broadcast", callback_data="broadcast")
     )
     return kb
 
@@ -124,67 +106,31 @@ def panel(message):
         return
     bot.send_message(
         message.chat.id,
-        "⚙️ <b>Admin Control Panel</b>\n\nReply to forwarded user message where needed.",
+        "⚙️ <b>Admin Panel</b>\nReply to forwarded message.",
         reply_markup=admin_panel()
     )
 
-# ---------- PANEL CALLBACKS ----------
+# ---------------- BUTTON HANDLER ----------------
 @bot.callback_query_handler(func=lambda c: True)
-def callbacks(call):
+def buttons(call):
     if call.from_user.id != OWNER_ID:
         return
-
     bot.answer_callback_query(call.id)
 
-    cid = call.message.chat.id
-
     if call.data == "total":
-        bot.send_message(cid, f"👥 Total Users: {len(users)}")
+        bot.send_message(call.message.chat.id, f"👥 Users: {len(users)}")
+    else:
+        bot.send_message(call.message.chat.id, f"Reply to forwarded msg with /{call.data}")
 
-    elif call.data == "stats":
-        bot.send_message(
-            cid,
-            f"""
-📊 <b>Bot Stats</b>
-👥 Users: {len(users)}
-🚫 Banned: {len(banned_users)}
-🤫 Silent: {len(silent_users)}
-"""
-        )
-
-    elif call.data == "ban":
-        bot.send_message(cid, "🚫 Reply to forwarded message with:\n/ban")
-
-    elif call.data == "unban":
-        bot.send_message(cid, "✅ Reply to forwarded message with:\n/unban")
-
-    elif call.data == "silent":
-        bot.send_message(cid, "🤫 Reply to forwarded message with:\n/silent")
-
-    elif call.data == "info":
-        bot.send_message(cid, "👤 Reply to forwarded message with:\n/info")
-
-    elif call.data == "dp":
-        bot.send_message(cid, "🖼 Reply to forwarded message with:\n/dp")
-
-    elif call.data == "broadcast":
-        bot.send_message(cid, "📢 Reply to any message with:\n/broadcast")
-
-    elif call.data == "admin_on":
-        global admin_online
-        admin_online = True
-        bot.send_message(cid, "🟢 Admin is now ONLINE")
-
-    elif call.data == "admin_off":
-        admin_online = False
-        bot.send_message(cid, "🔴 Admin is now OFFLINE")
-
-# ---------- ADMIN COMMANDS ----------
+# ---------------- ADMIN COMMANDS ----------------
 @bot.message_handler(commands=['ban'])
 def ban(message):
     if message.from_user.id != OWNER_ID or not message.reply_to_message:
         return
-    uid = message.reply_to_message.forward_from.id
+    mid = message.reply_to_message.message_id
+    uid = reply_map.get(mid)
+    if not uid:
+        return
     banned_users.add(uid)
     bot.send_message(message.chat.id, f"🚫 User {uid} banned")
 
@@ -192,7 +138,10 @@ def ban(message):
 def unban(message):
     if message.from_user.id != OWNER_ID or not message.reply_to_message:
         return
-    uid = message.reply_to_message.forward_from.id
+    mid = message.reply_to_message.message_id
+    uid = reply_map.get(mid)
+    if not uid:
+        return
     banned_users.discard(uid)
     bot.send_message(message.chat.id, f"✅ User {uid} unbanned")
 
@@ -200,7 +149,9 @@ def unban(message):
 def silent(message):
     if message.from_user.id != OWNER_ID or not message.reply_to_message:
         return
-    uid = message.reply_to_message.forward_from.id
+    uid = reply_map.get(message.reply_to_message.message_id)
+    if not uid:
+        return
     silent_users.add(uid)
     bot.send_message(message.chat.id, f"🤫 User {uid} silenced")
 
@@ -208,16 +159,18 @@ def silent(message):
 def info(message):
     if message.from_user.id != OWNER_ID or not message.reply_to_message:
         return
-    u = message.reply_to_message.forward_from
-    data = users.get(u.id, {})
+    uid = reply_map.get(message.reply_to_message.message_id)
+    if not uid:
+        return
+    u = users.get(uid, {})
     bot.send_message(
         message.chat.id,
         f"""
 👤 <b>User Info</b>
-🆔 ID: <code>{u.id}</code>
-👤 Name: {data.get('name')}
-🔗 Username: @{data.get('username')}
-📅 Joined: {data.get('joined')}
+🆔 {uid}
+👤 {u.get('name')}
+🔗 @{u.get('username')}
+📅 {u.get('joined')}
 """
     )
 
@@ -225,12 +178,14 @@ def info(message):
 def dp(message):
     if message.from_user.id != OWNER_ID or not message.reply_to_message:
         return
-    u = message.reply_to_message.forward_from
-    photos = bot.get_user_profile_photos(u.id)
-    if photos.total_count > 0:
+    uid = reply_map.get(message.reply_to_message.message_id)
+    if not uid:
+        return
+    photos = bot.get_user_profile_photos(uid)
+    if photos.total_count:
         bot.send_photo(message.chat.id, photos.photos[0][0].file_id)
     else:
-        bot.send_message(message.chat.id, "😕 No profile photo")
+        bot.send_message(message.chat.id, "😕 No DP")
 
 @bot.message_handler(commands=['broadcast'])
 def broadcast(message):
@@ -243,9 +198,9 @@ def broadcast(message):
             sent += 1
         except:
             pass
-    bot.send_message(message.chat.id, f"📢 Broadcast sent to {sent} users")
+    bot.send_message(message.chat.id, f"📢 Sent to {sent} users")
 
-# ---------- RUN ----------
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     threading.Thread(target=run_bot).start()
     app.run(host="0.0.0.0", port=10000)
