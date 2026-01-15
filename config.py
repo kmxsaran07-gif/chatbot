@@ -1,7 +1,7 @@
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("8327651421"))
+OWNER_ID = int(os.getenv("OWNER_ID"))
 
 WELCOME_MSG = """
 👋 Welcome {name}!
